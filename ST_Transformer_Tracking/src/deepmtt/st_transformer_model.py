@@ -359,7 +359,32 @@ def data_iter(batch_size, ori_traj_set, obser_set, tra_traj_set, output_results_
         yield ori_traj_set.index_select(0, j_batch),obser_set.index_select(0, j_batch),tra_traj_set.index_select(0, j_batch), \
             output_results_set.index_select(0, j_batch), Traj_turn_set.index_select(0, j_batch)
 
-def train(encode_layers,d_model,n_heads,in_dim,seq_len,pred_length,d_ff=None,dropout=0.1):
+def load_or_create_training_data(data_path, use_existing_data=True):
+    required_keys = (
+        "ori_traj_set",
+        "obser_set",
+        "tra_traj_set",
+        "output_results_set",
+        "Traj_turn_set",
+    )
+    data_path = Path(data_path)
+
+    if use_existing_data and data_path.exists():
+        print(f"Loading existing training data: {data_path}")
+        mat_data = loadmat(data_path)
+        missing_keys = [key for key in required_keys if key not in mat_data]
+        if missing_keys:
+            raise KeyError(f"Training data file is missing keys: {missing_keys}")
+        return tuple(mat_data[key] for key in required_keys)
+
+    print(f"Generating new training data: {data_path}")
+    training_data = creat_batch3(0, 100000 - 1, 30, 3, 300)
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    savemat(data_path, dict(zip(required_keys, training_data)))
+    return training_data
+
+
+def train(encode_layers,d_model,n_heads,in_dim,seq_len,pred_length,d_ff=None,dropout=0.1,use_existing_data=True,data_path=DATA_PATH):
     print("model init")
     net = Network(encode_layers, d_model, n_heads, in_dim, seq_len,pred_length, d_ff, dropout)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -374,9 +399,10 @@ def train(encode_layers,d_model,n_heads,in_dim,seq_len,pred_length,d_ff=None,dro
     for name, param in net.named_parameters():
         print("model:",name,param.requires_grad)
 
-    ori_traj_set, obser_set, tra_traj_set, output_results_set, Traj_turn_set = creat_batch3(0, 100000 - 1, 30, 3, 300)
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    savemat(DATA_PATH, {'ori_traj_set':ori_traj_set,'obser_set':obser_set,'tra_traj_set':tra_traj_set,'output_results_set':output_results_set,'Traj_turn_set':Traj_turn_set})
+    ori_traj_set, obser_set, tra_traj_set, output_results_set, Traj_turn_set = load_or_create_training_data(
+        data_path,
+        use_existing_data=use_existing_data,
+    )
     ori_traj_set = torch.DoubleTensor(ori_traj_set).to(device)
     obser_set = torch.DoubleTensor(obser_set).to(device)
     tra_traj_set = torch.DoubleTensor(tra_traj_set).to(device)
@@ -413,13 +439,28 @@ def parse_args(argv=None):
     parser.add_argument("--in_dim",type=int,default=4)
     parser.add_argument("--seq_len",type=int,default=50)
     parser.add_argument("--pred_length",type=int,default=1)
+    parser.add_argument("--data-path", type=Path, default=DATA_PATH, help="Path to training data .mat file")
+    data_group = parser.add_mutually_exclusive_group()
+    data_group.add_argument(
+        "--use-existing-data",
+        dest="use_existing_data",
+        action="store_true",
+        help="Load --data-path when it exists, otherwise generate it",
+    )
+    data_group.add_argument(
+        "--regenerate-data",
+        dest="use_existing_data",
+        action="store_false",
+        help="Ignore existing --data-path and regenerate training data",
+    )
+    parser.set_defaults(use_existing_data=True)
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     train(encode_layers=args.encode_layers,d_model=args.d_model,n_heads=args.n_heads,in_dim=args.in_dim,\
-          seq_len=args.seq_len,pred_length=args.pred_length)
+          seq_len=args.seq_len,pred_length=args.pred_length,use_existing_data=args.use_existing_data,data_path=args.data_path)
 
 if __name__ == "__main__":
     main()
