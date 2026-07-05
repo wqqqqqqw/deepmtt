@@ -13,7 +13,7 @@ import torch
 
 from filterpy.kalman import JulierSigmaPoints, UnscentedKalmanFilter
 
-from .st_transformer_model import Network
+from .st_transformer_model import KinematicTurnRateNet, Network
 
 
 DT = 0.1
@@ -313,15 +313,11 @@ def latest_checkpoint(explicit_path=None):
         path = Path(explicit_path)
         return path if path.exists() else PROJECT_ROOT / path
     model_dir = CHECKPOINT_DIR
-    candidates = sorted(model_dir.glob("ST_Transformer_0418_iter_*.pth"))
+    candidates = sorted(model_dir.glob("ST_Transformer*.pth"))
     if not candidates:
         raise FileNotFoundError(f"No checkpoint found in {model_dir}")
 
-    def key_fn(path):
-        match = re.search(r"iter_(\d+)\.pth$", path.name)
-        return int(match.group(1)) if match else -1
-
-    return max(candidates, key=key_fn)
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def parse_turn_rates(turn_rates_text, segment_count):
@@ -340,28 +336,36 @@ def parse_turn_rates(turn_rates_text, segment_count):
 
 
 def load_turn_rate_model(checkpoint_path, device):
-    model = Network(
-        encode_layers=2,
-        d_model=32,
-        n_heads=3,
-        in_dim=4,
-        seq_len=SEQ_LEN,
-        pred_length=1,
-    )
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    config = checkpoint.get("model_config", {}) if isinstance(checkpoint, dict) else {}
+    if config.get("model_arch", "transformer") == "kinematic":
+        model = KinematicTurnRateNet(DT)
+    else:
+        model = Network(
+            encode_layers=config.get("encode_layers", 2),
+            d_model=config.get("d_model", 32),
+            n_heads=config.get("n_heads", 3),
+            in_dim=config.get("in_dim", 4),
+            seq_len=config.get("seq_len", SEQ_LEN),
+            pred_length=config.get("pred_length", 1),
+            d_ff=config.get("d_ff", None),
+            dropout=config.get("dropout", 0.1),
+        )
     state_dict = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
     model.load_state_dict(state_dict, strict=True)
-    model = model.to(device)
-    model.double()
+    model.seq_len = config.get("seq_len", SEQ_LEN)
+    model.dtype = torch.float32 if config.get("dtype", "float64") == "float32" else torch.float64
+    model = model.to(device=device, dtype=model.dtype)
     model.eval()
     return model
 
 
 def predict_turn_rate(model, history_window, device):
-    window = pad_history(history_window, SEQ_LEN)
+    seq_len = getattr(model, "seq_len", SEQ_LEN)
+    window = pad_history(history_window, seq_len)
     window = normalize_like_training(window)
-    tensor = torch.tensor(window.tolist(), dtype=torch.float64, device=device).unsqueeze(0)
-    with torch.no_grad():
+    tensor = torch.as_tensor(window, dtype=getattr(model, "dtype", torch.float64), device=device).unsqueeze(0)
+    with torch.inference_mode():
         pred = model(tensor).detach().cpu().view(-1)[0].item()
     return float(np.clip(pred, -10.0, 10.0))
 
@@ -399,7 +403,7 @@ def run_standard_ukf(true_traj, observations, dt):
     return np.asarray(estimates, dtype=np.float64)
 
 
-def run_adaptive_ukf(true_traj, observations, model, device, dt, warmup_steps=8, refresh_period=3):
+def run_adaptive_ukf(true_traj, observations, model, device, dt, warmup_steps=8, refresh_period=1, turn_smoothing=0.25):
     ukf = create_ukf(dt)
     ukf.fx = fx_turn
     initialize_filter(ukf, true_traj)
@@ -428,7 +432,7 @@ def run_adaptive_ukf(true_traj, observations, model, device, dt, warmup_steps=8,
                 dt,
                 previous_turn_rate=smoothed_turn_rate,
             )
-            smoothed_turn_rate = candidate_turn_rate if smoothed_turn_rate is None else 0.9 * smoothed_turn_rate + 0.1 * candidate_turn_rate
+            smoothed_turn_rate = candidate_turn_rate if smoothed_turn_rate is None else turn_smoothing * smoothed_turn_rate + (1.0 - turn_smoothing) * candidate_turn_rate
 
         turn_rate_preds.append(smoothed_turn_rate)
         ukf.predict(fx_args=(smoothed_turn_rate,))
@@ -439,12 +443,16 @@ def run_adaptive_ukf(true_traj, observations, model, device, dt, warmup_steps=8,
     return np.asarray(estimates, dtype=np.float64), np.asarray(turn_rate_preds, dtype=np.float64)
 
 
-def run_adaptive_ukf_aligned(true_traj, observations, model, device, dt, warmup_steps=SEQ_LEN, refresh_period=3):
+def run_adaptive_ukf_aligned(true_traj, observations, model, device, dt, warmup_steps=None, refresh_period=1, turn_smoothing=0.25):
     ukf = create_ukf(dt)
     ukf.fx = fx_turn
     initialize_filter(ukf, true_traj)
     estimates = [ukf.x.copy()]
     turn_rate_preds = []
+
+    seq_len = getattr(model, "seq_len", SEQ_LEN)
+    if warmup_steps is None:
+        warmup_steps = seq_len
 
     smoothed_turn_rate = None
     for step_idx, z in enumerate(observations[2:], start=2):
@@ -456,9 +464,9 @@ def run_adaptive_ukf_aligned(true_traj, observations, model, device, dt, warmup_
             continue
 
         if (step_idx - warmup_steps) % refresh_period == 0 or smoothed_turn_rate is None:
-            history_window = true_traj[max(0, step_idx - SEQ_LEN + 1): step_idx + 1]
+            history_window = true_traj[max(0, step_idx - seq_len + 1): step_idx + 1]
             turn_rate_pred = predict_turn_rate(model, history_window, device)
-            smoothed_turn_rate = turn_rate_pred if smoothed_turn_rate is None else 0.85 * smoothed_turn_rate + 0.15 * turn_rate_pred
+            smoothed_turn_rate = turn_rate_pred if smoothed_turn_rate is None else turn_smoothing * smoothed_turn_rate + (1.0 - turn_smoothing) * turn_rate_pred
 
         turn_rate_preds.append(smoothed_turn_rate)
         ukf.predict(fx_args=(smoothed_turn_rate,))
@@ -518,7 +526,7 @@ def trajectory_rmse(true_traj, est_traj):
     return float(np.sqrt(np.mean(np.sum(diff ** 2, axis=1))))
 
 
-def validate(model, device, num_traj, data_len, seed, out_path, turn_rates=None):
+def validate(model, device, num_traj, data_len, seed, out_path, turn_rates=None, warmup_steps=None, refresh_period=1, turn_smoothing=0.25):
     segment_count = num_traj
     true_trajs, observations, turn_rate_seqs, maneuver_turn_rates, change_points, lengths = training_like_batch(
         segment_count,
@@ -530,7 +538,16 @@ def validate(model, device, num_traj, data_len, seed, out_path, turn_rates=None)
     obs = observations[0]
     turn_rate_seq = turn_rate_seqs[0]
     std_est = run_standard_ukf(true_traj, obs, DT)
-    adapt_est, pred_turn = run_adaptive_ukf_aligned(true_traj, obs, model, device, DT, warmup_steps=SEQ_LEN)
+    adapt_est, pred_turn = run_adaptive_ukf_aligned(
+        true_traj,
+        obs,
+        model,
+        device,
+        DT,
+        warmup_steps=warmup_steps,
+        refresh_period=refresh_period,
+        turn_smoothing=turn_smoothing,
+    )
 
     std_error = trajectory_rmse(true_traj[1:1 + len(std_est)], std_est)
     adapt_error = trajectory_rmse(true_traj[1:1 + len(adapt_est)], adapt_est)
@@ -595,8 +612,8 @@ def main():
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=CHECKPOINT_DIR / "ST_Transformer_0418_iter_10000.pth",
-        help="Path to ST_Transformer checkpoint",
+        default=None,
+        help="Path to ST_Transformer checkpoint. Defaults to the newest ST_Transformer*.pth file.",
     )
     parser.add_argument("--num-traj", type=int, default=4, help="Number of motion segments in one trajectory")
     parser.add_argument("--data-len", type=int, default=2000, help="Trajectory length")
@@ -608,6 +625,9 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=7, help="Random seed")
     parser.add_argument("--out", type=Path, default=FIGURE_DIR / "adaptive_ukf_validation.png", help="Output figure path")
+    parser.add_argument("--warmup-steps", type=int, default=None, help="Steps before model turn-rate prediction starts")
+    parser.add_argument("--refresh-period", type=int, default=1, help="Model prediction refresh period in steps")
+    parser.add_argument("--turn-smoothing", type=float, default=0.25, help="Previous prediction weight; lower responds faster")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -617,7 +637,18 @@ def main():
 
     turn_rates = parse_turn_rates(args.turn_rates, args.num_traj)
 
-    validate(model, device, args.num_traj, args.data_len, args.seed, args.out, turn_rates=turn_rates)
+    validate(
+        model,
+        device,
+        args.num_traj,
+        args.data_len,
+        args.seed,
+        args.out,
+        turn_rates=turn_rates,
+        warmup_steps=args.warmup_steps,
+        refresh_period=args.refresh_period,
+        turn_smoothing=args.turn_smoothing,
+    )
 
 
 if __name__ == "__main__":
