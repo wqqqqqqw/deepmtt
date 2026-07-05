@@ -1,0 +1,18 @@
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+
+# Reference projects kept locally, not versioned in this repo
+Bi-STAT-master/
+Crossformer-master/
+
+# Large datasets and model weights kept locally
+*.mat
+*.pth
+*.ckpt*
+Models/checkpoint
+**/Models/checkpoint
+
+# Local virtual environments
+.venv/
+venv/
