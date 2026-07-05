@@ -19,7 +19,6 @@ Current environment notes:
 - Python: 3.9.23
 - PyTorch: 1.10.0
 - NumPy: 2.0.2, which emits a PyTorch compatibility warning in this env
-- TensorFlow: not installed, so the legacy TensorFlow simulation is not runnable
 
 ## Layout
 
@@ -28,7 +27,6 @@ ST_Transformer_Tracking/
   src/deepmtt/              Core project code
   src/filterpy/             Vendored FilterPy dependency
   scripts/                  Preferred command-line entry points
-  scripts/legacy/           Original TensorFlow simulation entry point
   data/                     Local training data, ignored by Git
   checkpoints/              Local model weights, ignored by Git
   logs/                     Local training logs, ignored by Git

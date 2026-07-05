@@ -5,8 +5,7 @@
 ### Root Files
 
 - `README.md`: current project guide and recommended commands.
-- `README`: original upstream DeepMTT notes. It describes the old TensorFlow
-  workflow and is kept for provenance.
+- `README`: short pointer to the current PyTorch-only workflow.
 - `.gitignore`: local ignore rules for caches, generated data, logs, and
   checkpoints.
 
@@ -47,10 +46,6 @@ implementation modules.
     model input, so it is useful for controlled analysis but optimistic for a
     strict online-tracking benchmark.
 
-- `src/deepmtt/tf_maxout.py`
-  - Original TensorFlow maxout helper used by the legacy simulation.
-  - Requires TensorFlow 1.x style APIs.
-
 - `src/filterpy/`
   - Vendored FilterPy source used by both training-data generation and UKF
     validation.
@@ -76,11 +71,6 @@ implementation modules.
   - Plots sampled true trajectories to
     `outputs/figures/real_trajectories.png`.
 
-- `scripts/legacy/Simulations_of_DeepMTT.py`
-  - Original TensorFlow DeepMTT simulation.
-  - Uses the legacy checkpoint under `checkpoints/tensorflow/`.
-  - Not runnable in the current `deepmtt` env because TensorFlow is absent.
-
 ### Local Artifacts
 
 - `data/MTT_TrainingData.mat`
@@ -88,9 +78,6 @@ implementation modules.
 
 - `checkpoints/pytorch/Save_Model/*.pth`
   - PyTorch ST-Transformer checkpoints. Ignored by Git.
-
-- `checkpoints/tensorflow/`
-  - Original TensorFlow checkpoint files. Ignored by Git.
 
 - `logs/train.log`
   - Training log used by `scripts/plot_train_log.py`. Ignored by Git.
