@@ -9,20 +9,10 @@
   workflow and is kept for provenance.
 - `.gitignore`: local ignore rules for caches, generated data, logs, and
   checkpoints.
-- `Trajectory_data_generator2.py`: compatibility wrapper for
-  `src/deepmtt/trajectory_data_generator.py`.
-- `batchdata_derive3.py`: compatibility wrapper for
-  `src/deepmtt/training_data.py`.
-- `LMTT_deta_bidr_0818.py`: compatibility wrapper for
-  `src/deepmtt/st_transformer_model.py`.
-- `adaptive_ukf_turnratev1.py`: compatibility wrapper for
-  `src/deepmtt/adaptive_ukf_turnrate.py`.
-- `plot_train_log.py`: compatibility wrapper for `scripts/plot_train_log.py`.
-- `plot_real_trajectories.py`: compatibility wrapper for
-  `scripts/plot_real_trajectories.py`.
-- `maxout.py`: compatibility wrapper for `src/deepmtt/tf_maxout.py`.
-- `Simulations_of_DeepMTT.py`: compatibility wrapper for the legacy TensorFlow
-  simulation in `scripts/legacy/`.
+
+The old root-level Python entry points were removed after the project was
+organized. Use `scripts/` for executable workflows and `src/deepmtt/` for
+implementation modules.
 
 ### Core Code
 
@@ -175,4 +165,3 @@ data/MTT_TrainingData.mat
   -> scripts/plot_real_trajectories.py
   -> outputs/figures/real_trajectories.png
 ```
-

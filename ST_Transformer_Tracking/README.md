@@ -2,7 +2,8 @@
 
 This directory contains the DeepMTT / ST-Transformer target-tracking workspace.
 It is organized so code, scripts, data, checkpoints, logs, and figures are
-separated while old entry-point filenames remain as compatibility wrappers.
+separated by role. Use `scripts/` for command-line entry points and `src/` for
+importable implementation code.
 
 ## Runtime
 
@@ -64,18 +65,3 @@ Plot samples from the generated training data:
 ```bash
 python scripts/plot_real_trajectories.py
 ```
-
-## Compatibility Wrappers
-
-These old filenames still exist at the project root and forward to the new
-locations:
-
-- `Trajectory_data_generator2.py`
-- `batchdata_derive3.py`
-- `LMTT_deta_bidr_0818.py`
-- `adaptive_ukf_turnratev1.py`
-- `plot_train_log.py`
-- `plot_real_trajectories.py`
-- `maxout.py`
-- `Simulations_of_DeepMTT.py`
-
