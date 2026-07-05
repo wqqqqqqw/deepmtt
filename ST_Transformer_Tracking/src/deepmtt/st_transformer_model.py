@@ -375,7 +375,7 @@ def train(encode_layers,d_model,n_heads,in_dim,seq_len,pred_length,d_ff=None,dro
         if (i + 1) % save_st == 0:
             best_state_dict = copy(net.state_dict())
             Saved_dict = {'model': best_state_dict}
-            torch.save(Saved_dict, CHECKPOINT_DIR / f"ST_Transformer_0418_iter_{i+1}.pth")
+            torch.save(Saved_dict, CHECKPOINT_DIR / f"ST_Transformer_0705_iter_{i+1}.pth")
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
