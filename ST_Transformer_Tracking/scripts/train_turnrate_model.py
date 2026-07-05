@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Compatibility wrapper for src/deepmtt/st_transformer_model.py."""
+"""Train the ST-Transformer turn-rate model."""
 
 from pathlib import Path
 import sys
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from deepmtt.st_transformer_model import *  # noqa: F401,F403
 from deepmtt.st_transformer_model import main
 
 
