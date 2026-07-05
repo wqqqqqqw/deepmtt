@@ -13,7 +13,7 @@ import torch
 
 from filterpy.kalman import JulierSigmaPoints, UnscentedKalmanFilter
 
-from .st_transformer_model import KinematicTurnRateNet, Network
+from .st_transformer_model import FeatureTransformerNet, KinematicTurnRateNet, Network
 
 
 DT = 0.1
@@ -338,8 +338,19 @@ def parse_turn_rates(turn_rates_text, segment_count):
 def load_turn_rate_model(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint.get("model_config", {}) if isinstance(checkpoint, dict) else {}
-    if config.get("model_arch", "transformer") == "kinematic":
+    model_arch = config.get("model_arch", "transformer")
+    if model_arch == "kinematic":
         model = KinematicTurnRateNet(DT)
+    elif model_arch == "feature_transformer":
+        model = FeatureTransformerNet(
+            encode_layers=config.get("encode_layers", 2),
+            d_model=config.get("d_model", 32),
+            n_heads=config.get("n_heads", 3),
+            seq_len=config.get("seq_len", SEQ_LEN),
+            pred_length=config.get("pred_length", 1),
+            d_ff=config.get("d_ff", None),
+            dropout=config.get("dropout", 0.1),
+        )
     else:
         model = Network(
             encode_layers=config.get("encode_layers", 2),

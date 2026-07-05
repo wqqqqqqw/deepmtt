@@ -283,9 +283,39 @@ class KinematicTurnRateNet(nn.Module):
         return self.scale * turn_rate + self.bias
 
 
+class FeatureTransformerNet(nn.Module):
+    def __init__(self, encode_layers, d_model, n_heads, seq_len, pred_length, d_ff=None, dropout=0.1, dt=DT):
+        super().__init__()
+        self.dt = dt
+        self.transformer = Network(
+            encode_layers=encode_layers,
+            d_model=d_model,
+            n_heads=n_heads,
+            in_dim=5,
+            seq_len=seq_len,
+            pred_length=pred_length,
+            d_ff=d_ff,
+            dropout=dropout,
+        )
+
+    def forward(self, inputs):
+        velocities = inputs[:, :, 2:4]
+        prev_v = velocities[:, :-1, :]
+        curr_v = velocities[:, 1:, :]
+        cross = prev_v[:, :, 0] * curr_v[:, :, 1] - prev_v[:, :, 1] * curr_v[:, :, 0]
+        dot = prev_v[:, :, 0] * curr_v[:, :, 0] + prev_v[:, :, 1] * curr_v[:, :, 1]
+        delta_heading = torch.atan2(cross, dot)
+        turn_feature = delta_heading / self.dt * (180.0 / torch.pi)
+        turn_feature = torch.clamp(turn_feature, -10.0, 10.0)
+        turn_feature = F.pad(turn_feature, (1, 0), value=0.0).unsqueeze(-1)
+        return self.transformer(torch.cat([inputs, turn_feature], dim=-1))
+
+
 def build_model(model_arch, encode_layers, d_model, n_heads, in_dim, seq_len, pred_length, d_ff=None, dropout=0.1):
     if model_arch == "transformer":
         return Network(encode_layers, d_model, n_heads, in_dim, seq_len, pred_length, d_ff, dropout)
+    if model_arch == "feature_transformer":
+        return FeatureTransformerNet(encode_layers, d_model, n_heads, seq_len, pred_length, d_ff, dropout)
     if model_arch == "kinematic":
         return KinematicTurnRateNet(DT)
     raise ValueError(f"Unsupported model architecture: {model_arch}")
@@ -575,7 +605,7 @@ def train(
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-arch", choices=("transformer", "kinematic"), default="transformer")
+    parser.add_argument("--model-arch", choices=("transformer", "feature_transformer", "kinematic"), default="transformer")
     parser.add_argument("--encode_layers",type=int,default=2)    # 1
     parser.add_argument("--d_model",type=int,default=32)
     parser.add_argument("--n_heads",type=int,default=3)
