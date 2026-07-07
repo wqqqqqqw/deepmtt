@@ -440,7 +440,7 @@ def main():
     parser.add_argument(
         "--out",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "figures" / "detection_ukf_WestAfrica-9_49_track0.png",
+        default=PROJECT_ROOT / "outputs" / "figures" / "detection_tracking" / "detection_ukf_WestAfrica-9_49_all_tracks.png",
     )
     args = parser.parse_args()
     run_detection_ukf(args)
