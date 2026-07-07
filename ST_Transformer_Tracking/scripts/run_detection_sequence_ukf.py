@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,19 @@ class Track:
     def append(self, detection):
         self.detections.append(detection)
         self.missed = 0
+
+    def extend(self, detections):
+        self.detections.extend(detections)
+        self.detections.sort(key=lambda det: det.frame_idx)
+        self.missed = 0
+
+    @property
+    def start_frame(self):
+        return self.detections[0].frame_idx
+
+    @property
+    def end_frame(self):
+        return self.detections[-1].frame_idx
 
     @property
     def velocity(self):
@@ -105,7 +119,7 @@ def write_components_txt(frame_path, frame_id, detections):
             )
 
 
-def generate_multitarget_txt(result_root, sequence, output_root, min_area=1):
+def generate_multitarget_txt(result_root, sequence, output_root, min_area=1, keep_frame_txt=False):
     result_root = Path(result_root)
     output_root = Path(output_root)
     pred_dir = result_root / "predict" / sequence
@@ -122,8 +136,13 @@ def generate_multitarget_txt(result_root, sequence, output_root, min_area=1):
     seq_root = output_root / sequence
     pred_frame_dir = seq_root / "predict_frames"
     gt_frame_dir = seq_root / "gt_frames"
-    pred_frame_dir.mkdir(parents=True, exist_ok=True)
-    gt_frame_dir.mkdir(parents=True, exist_ok=True)
+    if keep_frame_txt:
+        pred_frame_dir.mkdir(parents=True, exist_ok=True)
+        gt_frame_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        for frame_dir in (pred_frame_dir, gt_frame_dir):
+            if frame_dir.exists():
+                shutil.rmtree(frame_dir)
 
     pred_summary = seq_root / f"{sequence}_predict_components.txt"
     gt_summary = seq_root / f"{sequence}_gt_components.txt"
@@ -147,8 +166,9 @@ def generate_multitarget_txt(result_root, sequence, output_root, min_area=1):
         ])
         gt_components[frame_idx] = gt_frame_components
 
-        write_components_txt(pred_frame_dir / f"{frame_id}.txt", frame_id, pred_components)
-        write_components_txt(gt_frame_dir / f"{frame_id}.txt", frame_id, gt_frame_components)
+        if keep_frame_txt:
+            write_components_txt(pred_frame_dir / f"{frame_id}.txt", frame_id, pred_components)
+            write_components_txt(gt_frame_dir / f"{frame_id}.txt", frame_id, gt_frame_components)
 
         for det_id, det in enumerate(pred_components):
             pred_rows.append({"frame": frame_id, "frame_idx": frame_idx, "det_id": det_id, **det})
@@ -166,40 +186,69 @@ def generate_multitarget_txt(result_root, sequence, output_root, min_area=1):
     print(f"frames: {len(frame_ids)}")
     print(f"predict components: {len(pred_rows)}")
     print(f"gt components: {len(gt_rows)}")
-    print(f"predict frame txt dir: {pred_frame_dir}")
-    print(f"gt frame txt dir: {gt_frame_dir}")
     print(f"predict summary txt: {pred_summary}")
     print(f"gt summary txt: {gt_summary}")
+    if keep_frame_txt:
+        print(f"predict frame txt dir: {pred_frame_dir}")
+        print(f"gt frame txt dir: {gt_frame_dir}")
     return frame_ids, frame_detections, gt_components, seq_root
 
 
-def link_tracks(frame_detections, max_link_distance=35.0, max_gap=5, velocity_weight=0.5):
+def association_gate(track, frame_idx, max_link_distance, gap_distance_growth, velocity_gate_weight):
+    gap = max(frame_idx - track.last.frame_idx, 1)
+    speed = float(np.linalg.norm(track.velocity))
+    return max_link_distance + gap_distance_growth * max(gap - 1, 0) + velocity_gate_weight * speed * gap
+
+
+def link_tracks(
+    frame_detections,
+    max_link_distance=35.0,
+    max_gap=12,
+    velocity_weight=0.5,
+    gap_distance_growth=8.0,
+    velocity_gate_weight=0.8,
+    merge_gap=30,
+    merge_distance=45.0,
+):
     tracks = []
     active_tracks = []
     progress = tqdm(frame_detections, desc="track link", unit="frame", dynamic_ncols=True)
     for frame_idx, detections in enumerate(progress):
         unused = set(range(len(detections)))
-        for track in list(active_tracks):
-            if not unused:
-                track.missed += 1
-                continue
-            predicted_xy = track.predict_position(frame_idx)
-            current_velocity = track.velocity
-            candidates = []
-            for det_idx in unused:
-                det = detections[det_idx]
-                det_xy = np.array([det.cx, det.cy], dtype=np.float64)
-                distance_cost = float(np.linalg.norm(det_xy - predicted_xy))
-                frame_delta = max(det.frame_idx - track.last.frame_idx, 1)
-                det_velocity = (det_xy - np.array([track.last.cx, track.last.cy], dtype=np.float64)) / frame_delta
-                velocity_cost = float(np.linalg.norm(det_velocity - current_velocity))
-                cost = distance_cost + velocity_weight * velocity_cost
-                candidates.append((cost, distance_cost, det_idx))
-            cost, distance, det_idx = min(candidates, key=lambda item: item[0])
-            if distance <= max_link_distance:
-                track.append(detections[det_idx])
-                unused.remove(det_idx)
-            else:
+        matched_tracks = set()
+
+        if active_tracks and detections:
+            cost_matrix = np.full((len(active_tracks), len(detections)), 1e9, dtype=np.float64)
+            for track_idx, track in enumerate(active_tracks):
+                predicted_xy = track.predict_position(frame_idx)
+                current_velocity = track.velocity
+                gate = association_gate(
+                    track,
+                    frame_idx,
+                    max_link_distance,
+                    gap_distance_growth,
+                    velocity_gate_weight,
+                )
+                for det_idx, det in enumerate(detections):
+                    det_xy = np.array([det.cx, det.cy], dtype=np.float64)
+                    distance_cost = float(np.linalg.norm(det_xy - predicted_xy))
+                    if distance_cost > gate:
+                        continue
+                    frame_delta = max(det.frame_idx - track.last.frame_idx, 1)
+                    det_velocity = (det_xy - np.array([track.last.cx, track.last.cy], dtype=np.float64)) / frame_delta
+                    velocity_cost = float(np.linalg.norm(det_velocity - current_velocity))
+                    cost_matrix[track_idx, det_idx] = distance_cost + velocity_weight * velocity_cost
+
+            row_idx, col_idx = linear_sum_assignment(cost_matrix)
+            for track_idx, det_idx in zip(row_idx, col_idx):
+                if cost_matrix[track_idx, det_idx] >= 1e9:
+                    continue
+                active_tracks[track_idx].append(detections[det_idx])
+                matched_tracks.add(track_idx)
+                unused.discard(det_idx)
+
+        for track_idx, track in enumerate(active_tracks):
+            if track_idx not in matched_tracks:
                 track.missed += 1
 
         for track in list(active_tracks):
@@ -211,8 +260,53 @@ def link_tracks(frame_detections, max_link_distance=35.0, max_gap=5, velocity_we
             tracks.append(track)
             active_tracks.append(track)
 
+    raw_track_count = len(tracks)
+    tracks = merge_track_segments(
+        tracks,
+        max_gap=merge_gap,
+        max_distance=merge_distance,
+        gap_distance_growth=gap_distance_growth,
+        velocity_gate_weight=velocity_gate_weight,
+    )
+    print(f"track segments before merge: {raw_track_count}")
+    print(f"track segments after merge: {len(tracks)}")
     tracks.sort(key=lambda track: (len(track.detections), sum(det.area for det in track.detections)), reverse=True)
     return tracks
+
+
+def merge_track_segments(tracks, max_gap=30, max_distance=45.0, gap_distance_growth=8.0, velocity_gate_weight=0.8):
+    tracks = sorted(tracks, key=lambda track: (track.start_frame, track.end_frame))
+    removed = set()
+    changed = True
+    while changed:
+        changed = False
+        for i, first in enumerate(tracks):
+            if i in removed:
+                continue
+            best_j = None
+            best_cost = None
+            for j, second in enumerate(tracks):
+                if j in removed or i == j:
+                    continue
+                gap = second.start_frame - first.end_frame
+                if gap <= 0 or gap > max_gap:
+                    continue
+                predicted_xy = first.predict_position(second.start_frame)
+                start_xy = np.array([second.detections[0].cx, second.detections[0].cy], dtype=np.float64)
+                distance = float(np.linalg.norm(start_xy - predicted_xy))
+                gate = max_distance + gap_distance_growth * max(gap - 1, 0) + velocity_gate_weight * float(np.linalg.norm(first.velocity)) * gap
+                if distance > gate:
+                    continue
+                speed_cost = float(np.linalg.norm(second.velocity - first.velocity))
+                cost = distance + speed_cost
+                if best_cost is None or cost < best_cost:
+                    best_cost = cost
+                    best_j = j
+            if best_j is not None:
+                first.extend(tracks[best_j].detections)
+                removed.add(best_j)
+                changed = True
+    return [track for idx, track in enumerate(tracks) if idx not in removed]
 
 
 def interpolate_xy(xy):
@@ -524,6 +618,7 @@ def run_detection_ukf(args):
         args.sequence,
         args.output_root,
         min_area=args.min_area,
+        keep_frame_txt=args.keep_frame_txt,
     )
 
     tracks = link_tracks(
@@ -531,6 +626,10 @@ def run_detection_ukf(args):
         max_link_distance=args.max_link_distance,
         max_gap=args.max_gap,
         velocity_weight=args.velocity_weight,
+        gap_distance_growth=args.gap_distance_growth,
+        velocity_gate_weight=args.velocity_gate_weight,
+        merge_gap=args.merge_gap,
+        merge_distance=args.merge_distance,
     )
     if not tracks:
         raise RuntimeError("No detection tracks were created")
@@ -607,10 +706,15 @@ def main():
     )
     parser.add_argument("--min-area", type=int, default=1)
     parser.add_argument("--max-link-distance", type=float, default=35.0)
-    parser.add_argument("--max-gap", type=int, default=5)
+    parser.add_argument("--max-gap", type=int, default=12)
     parser.add_argument("--velocity-weight", type=float, default=0.5)
+    parser.add_argument("--gap-distance-growth", type=float, default=8.0)
+    parser.add_argument("--velocity-gate-weight", type=float, default=0.8)
+    parser.add_argument("--merge-gap", type=int, default=30)
+    parser.add_argument("--merge-distance", type=float, default=45.0)
     parser.add_argument("--min-track-length", type=int, default=20)
     parser.add_argument("--max-tracks", type=int, default=None)
+    parser.add_argument("--keep-frame-txt", action="store_true", help="Also write one txt file per frame")
     parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--refresh-period", type=int, default=1)
     parser.add_argument("--turn-smoothing", type=float, default=0.25)

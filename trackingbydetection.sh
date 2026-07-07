@@ -12,7 +12,11 @@ python -u ST_Transformer_Tracking/scripts/run_detection_sequence_ukf.py \
   --min-area 1 \
   --max-link-distance 35 \
   --velocity-weight 0.5 \
-  --max-gap 5 \
+  --max-gap 12 \
+  --gap-distance-growth 8 \
+  --velocity-gate-weight 0.8 \
+  --merge-gap 30 \
+  --merge-distance 45 \
   --min-track-length 20 \
   --show \
   --video-out ST_Transformer_Tracking/outputs/figures/detection_tracking/WestAfrica-9_49_tracking.mp4 \
