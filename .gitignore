@@ -12,6 +12,8 @@ Crossformer-master/
 *.ckpt*
 *.zip
 *.tar.gz
+*.mp4
+*.gif
 detection/
 Models/checkpoint
 **/Models/checkpoint

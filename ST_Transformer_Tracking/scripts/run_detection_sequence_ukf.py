@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from scipy import ndimage
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -130,7 +133,9 @@ def generate_multitarget_txt(result_root, sequence, output_root, min_area=1):
     frame_detections = []
     gt_components = {}
 
-    for frame_idx, pred_path in enumerate(sorted(pred_dir.glob("*.png"))):
+    pred_paths = sorted(pred_dir.glob("*.png"))
+    progress = tqdm(pred_paths, desc=f"component txt {sequence}", unit="frame", dynamic_ncols=True)
+    for frame_idx, pred_path in enumerate(progress):
         frame_id = pred_path.stem
         frame_ids.append(frame_id)
         pred_components = extract_components(pred_path, min_area=min_area)
@@ -171,7 +176,8 @@ def generate_multitarget_txt(result_root, sequence, output_root, min_area=1):
 def link_tracks(frame_detections, max_link_distance=35.0, max_gap=5, velocity_weight=0.5):
     tracks = []
     active_tracks = []
-    for frame_idx, detections in enumerate(frame_detections):
+    progress = tqdm(frame_detections, desc="track link", unit="frame", dynamic_ncols=True)
+    for frame_idx, detections in enumerate(progress):
         unused = set(range(len(detections)))
         for track in list(active_tracks):
             if not unused:
@@ -357,6 +363,112 @@ def plot_all_tracks(results, out_path, sequence):
     plt.close(fig)
 
 
+def centered_to_image(points, image_size):
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim == 2 and points.shape[1] > 2:
+        points = points[:, :2]
+    center = np.array([image_size[0] / 2.0, image_size[1] / 2.0], dtype=np.float64)
+    return points + center
+
+
+def color_for_track(track_index):
+    palette = [
+        (255, 64, 64),
+        (64, 180, 255),
+        (80, 220, 120),
+        (255, 190, 64),
+        (200, 120, 255),
+        (255, 120, 190),
+        (120, 255, 230),
+        (230, 230, 80),
+    ]
+    return palette[track_index % len(palette)]
+
+
+def draw_polyline(draw, points, fill, width=2):
+    if len(points) < 2:
+        return
+    draw.line([tuple(map(float, point)) for point in points], fill=fill, width=width)
+
+
+def render_tracking_video(frame_ids, frame_detections, results, result_root, sequence, frame_dir, video_out, fps=12):
+    data_dir = Path(result_root) / "data" / sequence
+    frame_dir = Path(frame_dir)
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    video_out = Path(video_out)
+    video_out.parent.mkdir(parents=True, exist_ok=True)
+
+    first_image = Image.open(data_dir / f"{frame_ids[0]}.png").convert("RGB")
+    image_size = first_image.size
+    track_lookup = {result["track_index"]: result for result in results}
+
+    progress = tqdm(frame_ids, desc="render frames", unit="frame", dynamic_ncols=True)
+    for frame_idx, frame_id in enumerate(progress):
+        image = Image.open(data_dir / f"{frame_id}.png").convert("RGB")
+        draw = ImageDraw.Draw(image)
+
+        for det in frame_detections[frame_idx]:
+            draw.rectangle([det.x1, det.y1, det.x2, det.y2], outline=(170, 170, 170), width=1)
+            r = 2
+            draw.ellipse([det.cx - r, det.cy - r, det.cx + r, det.cy + r], fill=(230, 230, 230))
+
+        for track_index, result in track_lookup.items():
+            if frame_idx < result["start_frame"] or frame_idx > result["end_frame"]:
+                continue
+            local_idx = frame_idx - result["start_frame"]
+            color = color_for_track(track_index)
+            pred_points = centered_to_image(result["pred_xy"][:local_idx + 1], image_size)
+            adapt_points = centered_to_image(result["adapt_est"][:min(local_idx + 1, len(result["adapt_est"]))], image_size)
+            gt_points = centered_to_image(result["gt_xy"][:local_idx + 1], image_size)
+
+            draw_polyline(draw, gt_points, fill=(40, 255, 40), width=1)
+            draw_polyline(draw, pred_points, fill=color, width=2)
+            draw_polyline(draw, adapt_points, fill=(255, 255, 255), width=2)
+
+            if len(pred_points) > 0:
+                x, y = pred_points[-1]
+                draw.ellipse([x - 4, y - 4, x + 4, y + 4], outline=color, width=2)
+                draw.text((x + 5, y + 5), f"T{track_index}", fill=color)
+            if len(adapt_points) > 0:
+                x, y = adapt_points[-1]
+                draw.rectangle([x - 3, y - 3, x + 3, y + 3], outline=(255, 255, 255), width=2)
+
+        draw.rectangle([8, 8, 220, 54], fill=(0, 0, 0))
+        draw.text((14, 14), f"{sequence}", fill=(255, 255, 255))
+        draw.text((14, 32), f"frame {frame_id} | tracks {len(results)}", fill=(255, 255, 255))
+        image.save(frame_dir / f"{frame_idx:06d}.png")
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is not None and video_out.suffix.lower() == ".mp4":
+        print(f"Encoding mp4 with ffmpeg: {video_out}")
+        command = [
+            ffmpeg,
+            "-y",
+            "-framerate",
+            str(fps),
+            "-i",
+            str(frame_dir / "%06d.png"),
+            "-pix_fmt",
+            "yuv420p",
+            str(video_out),
+        ]
+        subprocess.run(command, check=True)
+        return video_out
+
+    gif_out = video_out.with_suffix(".gif") if video_out.suffix.lower() != ".gif" else video_out
+    print(f"ffmpeg not found; encoding gif fallback: {gif_out}")
+    frames = [Image.open(frame_dir / f"{idx:06d}.png").convert("P", palette=Image.ADAPTIVE) for idx in range(len(frame_ids))]
+    frames[0].save(
+        gif_out,
+        save_all=True,
+        append_images=frames[1:],
+        duration=max(int(1000 / fps), 1),
+        loop=0,
+        optimize=True,
+    )
+    return gif_out
+
+
 def run_detection_ukf(args):
     frame_ids, frame_detections, gt_components, seq_root = generate_multitarget_txt(
         args.result_root,
@@ -385,7 +497,8 @@ def run_detection_ukf(args):
     model = load_turn_rate_model(args.checkpoint, device)
 
     results = []
-    for track_index, track in enumerate(tracks):
+    progress = tqdm(list(enumerate(tracks)), desc="track ukf", unit="track", dynamic_ncols=True)
+    for track_index, track in progress:
         result = run_track_ukf(model, device, track, track_index, frame_ids, gt_components, image_size, seq_root, args)
         if result is not None:
             results.append(result)
@@ -416,6 +529,21 @@ def run_detection_ukf(args):
         print(f"mean Adaptive UKF RMSE: {np.mean([r['adaptive_rmse'] for r in results]):.3f} px")
         plot_all_tracks(results, args.out, args.sequence)
         print(f"Saved figure: {args.out}")
+        if args.show:
+            frame_dir = args.show_frame_dir or (seq_root / "visualization_frames")
+            video_out = args.video_out or (PROJECT_ROOT / "outputs" / "figures" / "detection_tracking" / f"{args.sequence}_tracking.mp4")
+            rendered_video = render_tracking_video(
+                frame_ids,
+                frame_detections,
+                results,
+                args.result_root,
+                args.sequence,
+                frame_dir,
+                video_out,
+                fps=args.fps,
+            )
+            print(f"Saved visualization frames: {frame_dir}")
+            print(f"Saved visualization video: {rendered_video}")
 
 
 def main():
@@ -437,6 +565,10 @@ def main():
     parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--refresh-period", type=int, default=1)
     parser.add_argument("--turn-smoothing", type=float, default=0.25)
+    parser.add_argument("--show", action="store_true", help="Render detections and tracking results on original images")
+    parser.add_argument("--video-out", type=Path, default=None, help="Output video path. Uses GIF fallback when ffmpeg is absent")
+    parser.add_argument("--show-frame-dir", type=Path, default=None, help="Directory for rendered visualization frames")
+    parser.add_argument("--fps", type=int, default=12)
     parser.add_argument(
         "--out",
         type=Path,
@@ -448,3 +580,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# conda run -n deepmtt python ST_Transformer_Tracking/scripts/run_detection_sequence_ukf.py \
+#   --result-root detection/result-0705 \
+#   --sequence WestAfrica-9_49 \
+#   --output-root detection/result-0705/detection_txt_multi \
+#   --checkpoint ST_Transformer_Tracking/checkpoints/pytorch/Save_Model/ST_Transformer_response_feature_transformer_0705_iter_60.pth \
+#   --min-area 1 \
+#   --max-link-distance 35 \
+#   --velocity-weight 0.5 \
+#   --max-gap 5 \
+#   --min-track-length 20 \
+#   --out ST_Transformer_Tracking/outputs/figures/detection_ukf_WestAfrica-9_49_all_tracks.png
