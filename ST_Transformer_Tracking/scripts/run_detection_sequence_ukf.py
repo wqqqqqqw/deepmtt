@@ -391,8 +391,36 @@ def draw_polyline(draw, points, fill, width=2):
     draw.line([tuple(map(float, point)) for point in points], fill=fill, width=width)
 
 
+def visible_detection_box(det, image_size, min_size=14):
+    x1, y1, x2, y2 = float(det.x1), float(det.y1), float(det.x2), float(det.y2)
+    cx, cy = float(det.cx), float(det.cy)
+    half = min_size / 2.0
+    if x2 - x1 < min_size:
+        x1, x2 = cx - half, cx + half
+    if y2 - y1 < min_size:
+        y1, y2 = cy - half, cy + half
+    width, height = image_size
+    return [
+        max(0.0, x1),
+        max(0.0, y1),
+        min(float(width - 1), x2),
+        min(float(height - 1), y2),
+    ]
+
+
+def resolve_gt_mask_dir(result_root, sequence):
+    gt_dir = Path(result_root) / "序列真值掩码" / sequence
+    if gt_dir.exists():
+        return gt_dir
+    alt_dir = Path(result_root) / "序列真值掩码" / sequence.replace("-", "_")
+    if alt_dir.exists():
+        return alt_dir
+    raise FileNotFoundError(f"Ground-truth mask directory not found for sequence: {sequence}")
+
+
 def render_tracking_video(frame_ids, frame_detections, results, result_root, sequence, frame_dir, video_out, fps=12):
     data_dir = Path(result_root) / "data" / sequence
+    gt_dir = resolve_gt_mask_dir(result_root, sequence)
     frame_dir = Path(frame_dir)
     frame_dir.mkdir(parents=True, exist_ok=True)
     video_out = Path(video_out)
@@ -404,13 +432,26 @@ def render_tracking_video(frame_ids, frame_detections, results, result_root, seq
 
     progress = tqdm(frame_ids, desc="render frames", unit="frame", dynamic_ncols=True)
     for frame_idx, frame_id in enumerate(progress):
-        image = Image.open(data_dir / f"{frame_id}.png").convert("RGB")
-        draw = ImageDraw.Draw(image)
+        left_image = Image.open(data_dir / f"{frame_id}.png").convert("RGB")
+        gt_path = gt_dir / f"{frame_id}.png"
+        if gt_path.exists():
+            right_image = Image.open(gt_path).convert("L").convert("RGB")
+        else:
+            right_image = Image.new("RGB", image_size, (0, 0, 0))
+        if right_image.size != image_size:
+            right_image = right_image.resize(image_size, Image.Resampling.NEAREST)
+
+        left_draw = ImageDraw.Draw(left_image)
+        right_draw = ImageDraw.Draw(right_image)
 
         for det in frame_detections[frame_idx]:
-            draw.rectangle([det.x1, det.y1, det.x2, det.y2], outline=(170, 170, 170), width=1)
+            det_box = visible_detection_box(det, image_size)
+            left_draw.rectangle(det_box, outline=(170, 170, 170), width=1)
             r = 2
-            draw.ellipse([det.cx - r, det.cy - r, det.cx + r, det.cy + r], fill=(230, 230, 230))
+            left_draw.ellipse([det.cx - r, det.cy - r, det.cx + r, det.cy + r], fill=(230, 230, 230))
+            right_draw.rectangle(det_box, outline=(255, 0, 0), width=3)
+            right_draw.line([det.cx - 5, det.cy, det.cx + 5, det.cy], fill=(255, 0, 0), width=1)
+            right_draw.line([det.cx, det.cy - 5, det.cx, det.cy + 5], fill=(255, 0, 0), width=1)
 
         for track_index, result in track_lookup.items():
             if frame_idx < result["start_frame"] or frame_idx > result["end_frame"]:
@@ -421,22 +462,30 @@ def render_tracking_video(frame_ids, frame_detections, results, result_root, seq
             adapt_points = centered_to_image(result["adapt_est"][:min(local_idx + 1, len(result["adapt_est"]))], image_size)
             gt_points = centered_to_image(result["gt_xy"][:local_idx + 1], image_size)
 
-            draw_polyline(draw, gt_points, fill=(40, 255, 40), width=1)
-            draw_polyline(draw, pred_points, fill=color, width=2)
-            draw_polyline(draw, adapt_points, fill=(255, 255, 255), width=2)
+            draw_polyline(left_draw, gt_points, fill=(40, 255, 40), width=1)
+            draw_polyline(left_draw, pred_points, fill=color, width=2)
+            draw_polyline(left_draw, adapt_points, fill=(255, 255, 255), width=2)
 
             if len(pred_points) > 0:
                 x, y = pred_points[-1]
-                draw.ellipse([x - 4, y - 4, x + 4, y + 4], outline=color, width=2)
-                draw.text((x + 5, y + 5), f"T{track_index}", fill=color)
+                left_draw.ellipse([x - 4, y - 4, x + 4, y + 4], outline=color, width=2)
+                left_draw.text((x + 5, y + 5), f"T{track_index}", fill=color)
             if len(adapt_points) > 0:
                 x, y = adapt_points[-1]
-                draw.rectangle([x - 3, y - 3, x + 3, y + 3], outline=(255, 255, 255), width=2)
+                left_draw.rectangle([x - 3, y - 3, x + 3, y + 3], outline=(255, 255, 255), width=2)
 
-        draw.rectangle([8, 8, 220, 54], fill=(0, 0, 0))
-        draw.text((14, 14), f"{sequence}", fill=(255, 255, 255))
-        draw.text((14, 32), f"frame {frame_id} | tracks {len(results)}", fill=(255, 255, 255))
-        image.save(frame_dir / f"{frame_idx:06d}.png")
+        left_draw.rectangle([8, 8, 276, 58], fill=(0, 0, 0))
+        left_draw.text((14, 14), f"{sequence} | tracking", fill=(255, 255, 255))
+        left_draw.text((14, 34), f"frame {frame_id} | tracks {len(results)}", fill=(255, 255, 255))
+        right_draw.rectangle([8, 8, 300, 58], fill=(0, 0, 0))
+        right_draw.text((14, 14), "GT mask + all detections", fill=(255, 255, 255))
+        right_draw.text((14, 34), f"red boxes: {len(frame_detections[frame_idx])}", fill=(255, 64, 64))
+
+        combined_size = (image_size[0] * 2, image_size[1] + image_size[1] % 2)
+        combined = Image.new("RGB", combined_size, (0, 0, 0))
+        combined.paste(left_image, (0, 0))
+        combined.paste(right_image, (image_size[0], 0))
+        combined.save(frame_dir / f"{frame_idx:06d}.png")
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is not None and video_out.suffix.lower() == ".mp4":
