@@ -537,6 +537,129 @@ def trajectory_rmse(true_traj, est_traj):
     return float(np.sqrt(np.mean(np.sum(diff ** 2, axis=1))))
 
 
+def interpolate_nan(values):
+    values = np.asarray(values, dtype=np.float64)
+    result = values.copy()
+    for dim in range(result.shape[1]):
+        series = result[:, dim]
+        valid = np.isfinite(series)
+        if valid.all():
+            continue
+        if not valid.any():
+            raise ValueError("Cannot interpolate a coordinate series with no valid values")
+        idx = np.arange(len(series))
+        series[~valid] = np.interp(idx[~valid], idx[valid], series[valid])
+        result[:, dim] = series
+    return result
+
+
+def load_detection_txt(detection_txt, image_origin="center"):
+    data = np.genfromtxt(detection_txt, names=True, dtype=None, encoding="utf-8")
+    if data.ndim == 0:
+        data = data.reshape(1)
+
+    pred_xy = np.column_stack([
+        data["pred_cx"].astype(np.float64),
+        data["pred_cy"].astype(np.float64),
+    ])
+    gt_xy = np.column_stack([
+        data["gt_cx"].astype(np.float64),
+        data["gt_cy"].astype(np.float64),
+    ])
+    pred_xy = interpolate_nan(pred_xy)
+    gt_xy = interpolate_nan(gt_xy)
+
+    if image_origin == "center":
+        max_x = np.nanmax(np.column_stack([pred_xy[:, 0], gt_xy[:, 0]]))
+        max_y = np.nanmax(np.column_stack([pred_xy[:, 1], gt_xy[:, 1]]))
+        center = np.array([max_x / 2.0, max_y / 2.0], dtype=np.float64)
+        pred_xy = pred_xy - center
+        gt_xy = gt_xy - center
+    elif image_origin != "topleft":
+        raise ValueError("image_origin must be 'center' or 'topleft'")
+
+    velocities = np.gradient(gt_xy, DT, axis=0)
+    true_traj = np.column_stack([gt_xy, velocities]).astype(np.float64)
+    observations = np.column_stack([
+        np.arctan2(pred_xy[:, 1], pred_xy[:, 0]),
+        np.hypot(pred_xy[:, 0], pred_xy[:, 1]),
+    ]).astype(np.float64)
+    return true_traj, observations, pred_xy
+
+
+def validate_detection_sequence(
+    model,
+    device,
+    detection_txt,
+    out_path,
+    image_origin="center",
+    warmup_steps=None,
+    refresh_period=1,
+    turn_smoothing=0.25,
+):
+    true_traj, observations, pred_xy = load_detection_txt(detection_txt, image_origin=image_origin)
+    seq_len = getattr(model, "seq_len", SEQ_LEN)
+    if warmup_steps is None:
+        warmup_steps = seq_len
+
+    std_est = run_standard_ukf(true_traj, observations, DT)
+    adapt_est, pred_turn = run_adaptive_ukf(
+        true_traj,
+        observations,
+        model,
+        device,
+        DT,
+        warmup_steps=warmup_steps,
+        refresh_period=refresh_period,
+        turn_smoothing=turn_smoothing,
+    )
+
+    std_error = trajectory_rmse(true_traj[1:1 + len(std_est)], std_est)
+    adapt_error = trajectory_rmse(true_traj[1:1 + len(adapt_est)], adapt_est)
+    raw_error = trajectory_rmse(true_traj, np.column_stack([pred_xy, np.zeros_like(pred_xy)]))
+
+    print(f"Detection txt: {detection_txt}")
+    print(f"Frames: {len(true_traj)}")
+    print(f"Raw detection centroid RMSE: {raw_error:.3f} px")
+    print(f"Standard UKF RMSE: {std_error:.3f} px")
+    print(f"Adaptive  UKF RMSE: {adapt_error:.3f} px")
+    print(f"Improvement over Standard UKF: {std_error - adapt_error:.3f} px")
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+    axes[0].plot(true_traj[:, 0], true_traj[:, 1], label="GT centroid", linewidth=2.0)
+    axes[0].scatter(pred_xy[:, 0], pred_xy[:, 1], s=4, label="Detection centroid", alpha=0.45)
+    axes[0].plot(std_est[:, 0], std_est[:, 1], label="Standard UKF", linewidth=1.5)
+    axes[0].plot(adapt_est[:, 0], adapt_est[:, 1], label="Adaptive UKF", linewidth=1.5)
+    axes[0].set_title("Detection-driven tracking")
+    axes[0].set_xlabel("X (px)")
+    axes[0].set_ylabel("Y (px)")
+    axes[0].axis("equal")
+    axes[0].grid(True, linestyle="--", alpha=0.35)
+    axes[0].legend()
+
+    steps = np.arange(len(pred_turn))
+    axes[1].plot(steps, pred_turn, label="Predicted turn rate", linewidth=1.5)
+    axes[1].set_title("Model-predicted turn rate")
+    axes[1].set_xlabel("Step")
+    axes[1].set_ylabel("Turn rate (deg)")
+    axes[1].grid(True, linestyle="--", alpha=0.35)
+    axes[1].legend()
+
+    names = ["Raw detection", "Standard UKF", "Adaptive UKF"]
+    values = [raw_error, std_error, adapt_error]
+    axes[2].bar(names, values)
+    axes[2].set_title("Centroid RMSE")
+    axes[2].set_ylabel("RMSE (px)")
+    axes[2].grid(True, axis="y", linestyle="--", alpha=0.35)
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=220)
+    plt.close(fig)
+    print(f"Saved figure: {out_path}")
+
+
 def validate(model, device, num_traj, data_len, seed, out_path, turn_rates=None, warmup_steps=None, refresh_period=1, turn_smoothing=0.25):
     segment_count = num_traj
     true_trajs, observations, turn_rate_seqs, maneuver_turn_rates, change_points, lengths = training_like_batch(
@@ -639,6 +762,8 @@ def main():
     parser.add_argument("--warmup-steps", type=int, default=None, help="Steps before model turn-rate prediction starts")
     parser.add_argument("--refresh-period", type=int, default=1, help="Model prediction refresh period in steps")
     parser.add_argument("--turn-smoothing", type=float, default=0.25, help="Previous prediction weight; lower responds faster")
+    parser.add_argument("--detection-txt", type=Path, default=None, help="Detection centroid txt generated from prediction masks")
+    parser.add_argument("--image-origin", choices=("center", "topleft"), default="center", help="Coordinate origin for detection txt")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -646,8 +771,20 @@ def main():
     print(f"Using checkpoint: {checkpoint_path}")
     model = load_turn_rate_model(checkpoint_path, device)
 
-    turn_rates = parse_turn_rates(args.turn_rates, args.num_traj)
+    if args.detection_txt is not None:
+        validate_detection_sequence(
+            model,
+            device,
+            args.detection_txt,
+            args.out,
+            image_origin=args.image_origin,
+            warmup_steps=args.warmup_steps,
+            refresh_period=args.refresh_period,
+            turn_smoothing=args.turn_smoothing,
+        )
+        return
 
+    turn_rates = parse_turn_rates(args.turn_rates, args.num_traj)
     validate(
         model,
         device,
