@@ -134,6 +134,7 @@ def generate_multitarget_txt(result_root, sequence, output_root, min_area=1, kee
         raise FileNotFoundError(f"Ground-truth mask directory not found: {gt_dir}")
 
     seq_root = output_root / sequence
+    seq_root.mkdir(parents=True, exist_ok=True)
     pred_frame_dir = seq_root / "predict_frames"
     gt_frame_dir = seq_root / "gt_frames"
     if keep_frame_txt:
